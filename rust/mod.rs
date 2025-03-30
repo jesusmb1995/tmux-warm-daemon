@@ -1,5 +1,5 @@
-
 use anyhow::{anyhow, Result};
+use chrono::Local;
 use daemonize::Daemonize;
 use nix::sys::signal::{self, SigSet, SigmaskHow, Signal};
 use nix::sys::signalfd;
@@ -7,94 +7,122 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use chrono::Local;
 
-fn main() -> Result<()> {
-    start_daemon()?;
-    let mut signal_fd = setup_signal_handler()?;
-    start_tmux_session("Initial")?;
-    main_loop(&mut signal_fd)
+struct Daemon {
+    pid_file: String,
+    log_file: String,
+    logger: File,
+    signal_fd: Option<signalfd::SignalFd>,
 }
 
-fn start_daemon() -> Result<()> {
-    let stdout = File::create("/tmp/tmux_warm_daemon.log")?;
-    let stderr = File::create("/tmp/tmux_warm_daemon.log")?;
+impl Daemon {
+    pub fn new(pid_file: &str, log_file: &str) -> Result<Self> {
+        let logger = Daemon::start_daemon(pid_file, log_file);
+        let signal_fd = Daemon::setup_signal_handler();
+        Ok(Self {
+            pid_file: pid_file.to_string(),
+            log_file: log_file.to_string(),
+            logger,
+            signal_fd ,
+        })
+    }
 
-    let daemonize = Daemonize::new()
-        .working_directory("/tmp")
-        .umask(0o002)
-        .pid_file("/tmp/tmux_warm_daemon.pid")
-        .stdout(stdout)
-        .stderr(stderr);
+    pub fn run() -> Result<()> {
+        daemon.start_tmux_session("Initial")?;
+        daemon.main_loop()
+    }
 
-    daemonize.start()
-}
+    fn start_daemon(pid_file: &str, log_file: &str) -> Result<File> {
+        let stdout = File::create(log_file)?;
+        let stderr = File::create(log_file)?;
 
-fn setup_signal_handler() -> Result<signalfd::SignalFd> {
-    let mut mask = SigSet::empty();
-    mask.add(Signal::SIGUSR1);
+        let daemonize = Daemonize::new()
+            .working_directory("/tmp")
+            .umask(0o002)
+            .pid_file(pid_file)
+            .stdout(stdout)
+            .stderr(stderr);
 
-    signal::sigprocmask(SigmaskHow::SIG_BLOCK, Some(&mask), None)?;
+        daemonize.start()?;
 
-    signalfd::SignalFd::with_flags(&mask, signalfd::SfdFlags::SFD_CLOEXEC)
-        .map_err(|e| anyhow!("Failed to create signal fd: {}", e))
-}
+        let file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(log_file)?;
 
-fn main_loop(signal_fd: &mut signalfd::SignalFd) -> Result<()> {
-    loop {
-        match signal_fd.read_signal() {
-            Ok(Some(info)) => {
-                if info.ssi_signo == Signal::SIGUSR1 as u32 {
-                    let sess_id = format!("SIGUSR1 {}", Local::now());
-                    start_tmux_session(&sess_id)?;
+        Ok(file)
+    }
+
+    fn setup_signal_handler() -> Result<signalfd::SignalFd> {
+        let mut mask = SigSet::empty();
+        mask.add(Signal::SIGUSR1);
+
+        signal::sigprocmask(SigmaskHow::SIG_BLOCK, Some(&mask), None)?;
+
+        let signal_fd = signalfd::SignalFd::with_flags(&mask, signalfd::SfdFlags::SFD_CLOEXEC)
+            .map_err(|e| anyhow!("Failed to create signal fd: {}", e))?;
+        Ok(singal_fd)
+    }
+
+    fn main_loop(&mut self) -> Result<()> {
+        loop {
+            match self.signal_fd.as_mut().unwrap().read_signal() {
+                Ok(Some(info)) => {
+                    if info.ssi_signo == Signal::SIGUSR1 as u32 {
+                        let sess_id = format!("SIGUSR1 {}", Local::now());
+                        self.start_tmux_session(&sess_id)?;
+                    }
                 }
+                Ok(None) => self.log_message("Received empty signal")?,
+                Err(e) => return Err(anyhow!("Error reading signal: {}", e)),
             }
-            Ok(None) => {}
-            Err(e) => return Err(anyhow!("Error reading signal: {}", e)),
         }
     }
-}
 
-fn count_detached_sessions() -> Result<usize> {
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("tmux list-sessions | grep -v 'attached' | wc -l")
-        .output()?;
+    fn count_detached_sessions(&self) -> Result<usize> {
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg("tmux list-sessions | grep -v 'attached' | wc -l")
+            .output()?;
 
-    if !output.status.success() {
-        return Err(anyhow!("Failed to count detached tmux sessions"));
+        if !output.status.success() {
+            return Err(anyhow!("Failed to count detached tmux sessions"));
+        }
+
+        let count_str = String::from_utf8(output.stdout)?.trim().to_string();
+        count_str.parse::<usize>().map_err(|e| anyhow!(e))
     }
 
-    let count_str = String::from_utf8(output.stdout)?.trim().to_string();
-    count_str.parse::<usize>().map_err(|e| anyhow!(e))
-}
+    fn start_tmux_session(&self, sess_id: &str) -> Result<()> {
+        let count = self.count_detached_sessions()?;
+        if count >= 2 {
+            self.log_message(&format!(
+                "Skipping session creation: already {count} detached sessions"
+            ))?;
+            return Ok(());
+        }
 
-fn start_tmux_session(sess_id: &str) -> Result<()> {
-    let count = count_detached_sessions()?;
-    if count >= 2 {
-        log_message(&format!("Skipping session creation: already {count} detached sessions"))?;
-        return Ok(());
+        std::thread::sleep(Duration::from_secs(1));
+
+        Command::new("tmux").arg("new-session").arg("-d").status()?;
+
+        self.log_message(&format!(
+            "Started tmux session at {}: {}",
+            Local::now(),
+            sess_id
+        ))?;
+        Ok(())
     }
 
-    // The sleep allows terminals that trigger a call to this daemon
-    // to have time to attach to existing sessions.
-    std::thread::sleep(Duration::from_secs(1));
-
-    Command::new("tmux")
-        .arg("new-session")
-        .arg("-d")
-        .status()?;
-
-    log_message(&format!("Started tmux session at {}: {}", Local::now(), sess_id))?;
-    Ok(())
+    fn log_message(&self, message: &str) -> Result<()> {
+        writeln!(self.file, "{}", message)?;
+        Ok(())
+    }
 }
 
-fn log_message(message: &str) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open("/tmp/tmux_warm_daemon.log")?;
-    writeln!(file, "{message}")?;
-    Ok(())
+fn main() -> Result<(), anyhow::Error> {
+    let daemon = Daemon::new("/tmp/tmux_warm_daemon.pid", "/tmp/tmux_warm_daemon.log")?;
+    daemon.run()?;
 }

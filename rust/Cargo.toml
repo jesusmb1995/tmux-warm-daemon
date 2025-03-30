@@ -1,0 +1,17 @@
+[package]
+name = "tmux_warm_daemon"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <you@example.com>"]
+description = "Background daemon for managing tmux sessions"
+
+[dependencies]
+anyhow = "1.0"
+chrono = "0.4"
+daemonize = "0.5"
+nix = "0.26"
+
+[[bin]]
+name = "tmux_warm_daemon"
+path = "mod.rs"
+
