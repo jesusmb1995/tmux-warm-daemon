@@ -1,3 +1,2 @@
-.venv
-.git
-rust/garget
+.*
+rust/target
