@@ -1,0 +1,37 @@
+diff --git a/plugins/tmux/tmux.plugin.zsh b/plugins/tmux/tmux.plugin.zsh
+index 4c184c2..85c4cf4 100644
+--- a/plugins/tmux/tmux.plugin.zsh
++++ b/plugins/tmux/tmux.plugin.zsh
+@@ -4,6 +4,7 @@ if ! (( $+commands[tmux] )); then
+ fi
+ 
+ # CONFIGURATION VARIABLES
++: ${ZSH_TMUX_CD:=false}
+ # Automatically start tmux
+ : ${ZSH_TMUX_AUTOSTART:=false}
+ # Only autostart once. If set to false, tmux will attempt to
+@@ -134,11 +135,20 @@ function _zsh_tmux_plugin_run() {
+   fi
+ 
+   # Try to connect to an existing session.
+-  if [[ -n "$session_name" ]]; then
+-    [[ "$ZSH_TMUX_AUTOCONNECT" == "true" ]] && $tmux_cmd attach $_detached -t "$session_name"
++  if [[ -n "$ZSH_TMUX_CD" ]]; then
++    prelaunch_pwd=$(pwd)
++  	if [[ -n "$session_name" ]]; then
++  	  [[ "$ZSH_TMUX_AUTOCONNECT" == "true" ]] && $tmux_cmd attach $_detached -t "$session_name" \; send-keys "cd '${prelaunch_pwd}'" Enter
++  	else
++  	  [[ "$ZSH_TMUX_AUTOCONNECT" == "true" ]] && $tmux_cmd attach $_detached \; send-keys "cd '${prelaunch_pwd}'" Enter
++  	fi
+   else
+-    [[ "$ZSH_TMUX_AUTOCONNECT" == "true" ]] && $tmux_cmd attach $_detached
+-  fi
++  	if [[ -n "$session_name" ]]; then
++  	  [[ "$ZSH_TMUX_AUTOCONNECT" == "true" ]] && $tmux_cmd attach $_detached -t "$session_name"
++  	else
++  	  [[ "$ZSH_TMUX_AUTOCONNECT" == "true" ]] && $tmux_cmd attach $_detached
++  	fi
++  fi 
+ 
+   # If failed, just run tmux, fixing the TERM variable if requested.
+   if [[ $? -ne 0 ]]; then
