@@ -52,11 +52,17 @@ sudo cp rust/target/release/tmux_warm_daemon /usr/bin/tmux_warm_daemon
 #   $HOME/.tmux_warm_daemon/rust/target/release/tmux_warm_daemon
 ```
 
-Apply mod to tmux plugin (originally based on `ef96242b9baad6b2211c386cb9af9418ace5d876` upstream):
+Apply mod to tmux plugin:
 ```
 tmux_warm_daemon_dir="$(pwd)"
 (cd "${HOME}/.oh-my-zsh/plugins/tmux" && git apply "${tmux_warm_daemon_dir}/tmux.plugin.zsh.diff")
 ```
+
+The plugin patch adds two config variables:
+- `ZSH_TMUX_CD` — send `cd` to the attached session to match the launching terminal's pwd
+- `ZSH_TMUX_WARM_SESSION_PREFIX` — when set, auto-attach targets a detached session
+  whose name starts with this prefix (e.g. `"warm"` matches `warm-0`, `warm-1`),
+  preventing accidental attachment to sessions from other pools like `agent-*`
 
 Set up tmux plugin in `.zshrc`:
 
@@ -69,6 +75,7 @@ fi
 
 export ZSH_TMUX_AUTOCONNECT=true
 export ZSH_TMUX_CD=true
+export ZSH_TMUX_WARM_SESSION_PREFIX="warm"
 
 if [ -z "$TMUX" ]; then
   export TMUX_WARM_DAEMON=$(cat /tmp/tmux_warm_daemon.pid 2>/dev/null)
@@ -77,11 +84,6 @@ if [ -z "$TMUX" ]; then
     $HOME/.tmux_warm_daemon/rust/target/release/tmux_warm_daemon
     export TMUX_WARM_DAEMON=$(cat /tmp/tmux_warm_daemon.pid 2>/dev/null)
   fi
-
-  # Target a warm-pool session to avoid attaching to agent/other pool sessions
-  _warm_session=$(tmux list-sessions -F '#{session_name} #{session_attached}' 2>/dev/null \
-    | awk '$1 ~ /^warm-/ && $2 == 0 { print $1; exit }')
-  [ -n "$_warm_session" ] && export ZSH_TMUX_DEFAULT_SESSION_NAME="$_warm_session"
 
   export TMUX_PREATTACH_PATH="$(pwd)"
   kill -USR1 ${TMUX_WARM_DAEMON}
