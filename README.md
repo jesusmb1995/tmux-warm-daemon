@@ -23,10 +23,11 @@ Each pool maintains its own set of pre-warmed tmux sessions:
 - **`warm`** — default pool for regular shell sessions (no command, just zsh).
   Sessions are named `warm-0`, `warm-1`, etc.
 - **`agent`** — pool with `agent` already started and waiting for input.
-  Sessions are named `agent-0`, `agent-1`, etc.
+  Generic sessions are named `agent-0`, `agent-1`, etc.
+  Workspace sessions are named `agent@<hash>` (see below).
 
 Pool options:
-- `max_detached` — how many detached (ready) sessions to keep warm (default: 2)
+- `max_detached` — how many generic detached sessions to keep warm (default: 2, set to 0 to disable)
 - `command` — optional command to run in the session (omit for a regular shell)
 
 If no config file exists, the daemon falls back to a single `warm` pool with `max_detached: 2`.
@@ -92,22 +93,50 @@ fi
 source $ZSH/oh-my-zsh.sh
 ```
 
+## Workspace-specific sessions
+
+For any pool named `<pool>`, the daemon automatically checks
+`/tmp/tmux_warm_<pool>_workspaces.json` on every SIGUSR1. If the file exists,
+it creates a session per workspace path. The JSON file is a plain array of
+absolute paths:
+
+```json
+["/home/user/project-alpha", "/home/user/project-beta"]
+```
+
+For example, writing the above to `/tmp/tmux_warm_agent_workspaces.json` creates:
+- `agent@<8-char md5 hash>` running `agent --workspace /home/user/project-alpha`
+- `agent@<8-char md5 hash>` running `agent --workspace /home/user/project-beta`
+
+These coexist with generic `agent-0` sessions (controlled by `max_detached`).
+Set `max_detached: 0` to only use workspace-specific sessions.
+
+The JSON file can be managed by external tooling (IDE hooks, scripts, cron).
+
 ## Attaching to non-default pools
 
 Use `attach_warm.sh` to attach to a pre-warmed session from any pool:
 
 ```bash
-# Attach to an agent session (default)
-bash attach_warm.sh
+# Usage: attach_warm.sh [pool_name] [init_cmd] [workspace_path]
 
-# Attach to a specific pool
+# Attach to a generic agent session
 bash attach_warm.sh agent
+
+# Attach with workspace — tries agent@<hash> first, falls back to generic
+bash attach_warm.sh agent "agent --workspace /my/project" /my/project
+
+# Shell pool — cd into current directory
+bash attach_warm.sh warm "cd $PWD"
 
 # Works from inside tmux too (uses switch-client)
 ```
 
-Or add a shell alias:
+Or add shell aliases:
 
 ```bash
-alias wa='bash $HOME/.tmux_warm_daemon/attach_warm.sh agent'
+# Agent pool — prefer workspace session, fall back to generic
+alias wa='bash $HOME/.tmux_warm_daemon/attach_warm.sh agent "" "$PWD"'
+# Shell pool — cd into current directory
+alias ww='bash $HOME/.tmux_warm_daemon/attach_warm.sh warm "cd $PWD"'
 ```

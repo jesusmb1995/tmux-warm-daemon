@@ -164,6 +164,13 @@ impl Daemon {
     }
 
     fn ensure_pool(&self, pool_name: &str, pool_config: &PoolConfig, trigger: &str) -> Result<()> {
+        let ws_file = format!("/tmp/tmux_warm_{}_workspaces.json", pool_name);
+        self.ensure_workspace_sessions(pool_name, pool_config, &ws_file, trigger)?;
+
+        if pool_config.max_detached == 0 {
+            return Ok(());
+        }
+
         let sessions = Self::existing_sessions()?;
         let prefix = format!("{}-", pool_name);
 
@@ -201,6 +208,85 @@ impl Daemon {
         ))?;
 
         Ok(())
+    }
+
+    fn ensure_workspace_sessions(
+        &self,
+        pool_name: &str,
+        pool_config: &PoolConfig,
+        ws_file: &str,
+        trigger: &str,
+    ) -> Result<()> {
+        let workspaces: Vec<String> = match fs::read_to_string(ws_file) {
+            Ok(contents) => match serde_json::from_str(&contents) {
+                Ok(ws) => ws,
+                Err(e) => {
+                    self.log(&format!(
+                        "[{}] Invalid JSON in '{}': {}",
+                        pool_name, ws_file, e
+                    ))?;
+                    return Ok(());
+                }
+            },
+            Err(_) => return Ok(()),
+        };
+
+        let sessions = Self::existing_sessions()?;
+        let existing_names: HashSet<String> =
+            sessions.into_iter().map(|(name, _)| name).collect();
+
+        for workspace in &workspaces {
+            let hash = Self::path_hash(workspace)?;
+            let session_name = format!("{}@{}", pool_name, hash);
+
+            if existing_names.contains(&session_name) {
+                continue;
+            }
+
+            std::thread::sleep(Duration::from_secs(1));
+
+            let mut cmd = Command::new("tmux");
+            cmd.args(["new-session", "-d", "-s", &session_name, "-c", workspace]);
+
+            if let Some(ref command) = pool_config.command {
+                cmd.arg(format!(
+                    "{} --workspace {}",
+                    command,
+                    Self::shell_quote(workspace)
+                ));
+            }
+
+            cmd.status()?;
+
+            self.log(&format!(
+                "[{}] Created workspace session '{}' for '{}' (trigger: {})",
+                pool_name, session_name, workspace, trigger
+            ))?;
+        }
+
+        Ok(())
+    }
+
+    fn path_hash(path: &str) -> Result<String> {
+        use std::process::Stdio;
+        let mut child = Command::new("md5sum")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open stdin for md5sum"))?
+            .write_all(path.as_bytes())?;
+
+        let output = child.wait_with_output()?;
+        let hash_str = String::from_utf8(output.stdout)?;
+        Ok(hash_str.chars().take(8).collect())
+    }
+
+    fn shell_quote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "'\\''"))
     }
 
     fn log(&self, message: &str) -> Result<()> {
