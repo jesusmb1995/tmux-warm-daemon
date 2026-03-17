@@ -10,6 +10,8 @@ anyhow = "1.0"
 chrono = "0.4"
 daemonize = "0.5"
 nix = "0.26"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
 
 [[bin]]
 name = "tmux_warm_daemon"

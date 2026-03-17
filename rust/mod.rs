@@ -3,28 +3,85 @@ use chrono::Local;
 use daemonize::Daemonize;
 use nix::sys::signal::{self, SigSet, SigmaskHow, Signal};
 use nix::sys::signalfd;
-use std::fs::{File, OpenOptions};
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::process::Command;
 use std::time::Duration;
 
+#[derive(Deserialize)]
+struct PoolConfig {
+    #[serde(default = "default_max_detached")]
+    max_detached: usize,
+    command: Option<String>,
+}
+
+fn default_max_detached() -> usize {
+    2
+}
+
+#[derive(Deserialize)]
+struct Config {
+    #[serde(default = "default_pid_file")]
+    pid_file: String,
+    #[serde(default = "default_log_file")]
+    log_file: String,
+    pools: HashMap<String, PoolConfig>,
+}
+
+fn default_pid_file() -> String {
+    "/tmp/tmux_warm_daemon.pid".into()
+}
+fn default_log_file() -> String {
+    "/tmp/tmux_warm_daemon.log".into()
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        let mut pools = HashMap::new();
+        pools.insert(
+            "warm".into(),
+            PoolConfig {
+                max_detached: 2,
+                command: None,
+            },
+        );
+        Config {
+            pid_file: default_pid_file(),
+            log_file: default_log_file(),
+            pools,
+        }
+    }
+}
+
+impl Config {
+    fn load(path: &str) -> Result<Self> {
+        let contents = fs::read_to_string(path)?;
+        let config: Config = serde_yaml::from_str(&contents)?;
+        Ok(config)
+    }
+}
+
 struct Daemon {
+    config: Config,
     logger: File,
     signal_fd: signalfd::SignalFd,
 }
 
 impl Daemon {
-    pub fn new(pid_file: &str, log_file: &str) -> Result<Self> {
-        let logger = Daemon::start_daemon(pid_file, log_file)?;
-        let signal_fd = Daemon::setup_signal_handler()?;
+    pub fn new(config: Config) -> Result<Self> {
+        let logger = Self::start_daemon(&config.pid_file, &config.log_file)?;
+        let signal_fd = Self::setup_signal_handler()?;
         Ok(Self {
+            config,
             logger,
             signal_fd,
         })
     }
 
     pub fn run(&mut self) -> Result<()> {
-        self.start_tmux_session("Initial")?;
+        self.ensure_all_pools("startup")?;
         self.main_loop()
     }
 
@@ -69,58 +126,104 @@ impl Daemon {
                 Ok(Some(info)) => {
                     if info.ssi_signo == Signal::SIGUSR1 as u32 {
                         let sess_id = format!("SIGUSR1 {}", Local::now());
-                        self.start_tmux_session(&sess_id)?;
+                        self.ensure_all_pools(&sess_id)?;
                     }
                 }
-                Ok(None) => self.log_message("Received empty signal")?,
+                Ok(None) => self.log("Received empty signal")?,
                 Err(e) => return Err(anyhow!("Error reading signal: {}", e)),
             }
         }
     }
 
-    fn count_detached_sessions(&self) -> Result<usize> {
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg("tmux list-sessions | grep -v 'attached' | wc -l")
+    fn ensure_all_pools(&self, trigger: &str) -> Result<()> {
+        for (pool_name, pool_config) in &self.config.pools {
+            self.ensure_pool(pool_name, pool_config, trigger)?;
+        }
+        Ok(())
+    }
+
+    fn existing_sessions() -> Result<Vec<(String, bool)>> {
+        let output = Command::new("tmux")
+            .args(["list-sessions", "-F", "#{session_name} #{session_attached}"])
             .output()?;
 
         if !output.status.success() {
-            return Err(anyhow!("Failed to count detached tmux sessions"));
+            return Ok(vec![]);
         }
 
-        let count_str = String::from_utf8(output.stdout)?.trim().to_string();
-        count_str.parse::<usize>().map_err(|e| anyhow!(e))
+        let result = String::from_utf8(output.stdout)?
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let name = parts.next()?.to_string();
+                let attached = parts.next().map(|s| s != "0").unwrap_or(false);
+                Some((name, attached))
+            })
+            .collect();
+        Ok(result)
     }
 
-    fn start_tmux_session(&self, sess_id: &str) -> Result<()> {
-        let count = self.count_detached_sessions()?;
-        if count >= 2 {
-            self.log_message(&format!(
-                "Skipping session creation: already {count} detached sessions"
+    fn ensure_pool(&self, pool_name: &str, pool_config: &PoolConfig, trigger: &str) -> Result<()> {
+        let sessions = Self::existing_sessions()?;
+        let prefix = format!("{}-", pool_name);
+
+        let detached_count = sessions
+            .iter()
+            .filter(|(name, attached)| name.starts_with(&prefix) && !attached)
+            .count();
+
+        if detached_count >= pool_config.max_detached {
+            self.log(&format!(
+                "[{}] Skipping: already {} detached session(s)",
+                pool_name, detached_count
             ))?;
             return Ok(());
         }
 
+        let existing_names: HashSet<&str> = sessions.iter().map(|(n, _)| n.as_str()).collect();
+        let session_name = (0..)
+            .map(|i| format!("{}-{}", pool_name, i))
+            .find(|name| !existing_names.contains(name.as_str()))
+            .unwrap();
+
         std::thread::sleep(Duration::from_secs(1));
 
-        Command::new("tmux").arg("new-session").arg("-d").status()?;
+        let mut cmd = Command::new("tmux");
+        cmd.args(["new-session", "-d", "-s", &session_name]);
+        if let Some(ref command) = pool_config.command {
+            cmd.arg(command);
+        }
+        cmd.status()?;
 
-        self.log_message(&format!(
-            "Started tmux session at {}: {}",
-            Local::now(),
-            sess_id
+        self.log(&format!(
+            "[{}] Created session '{}' (trigger: {})",
+            pool_name, session_name, trigger
         ))?;
+
         Ok(())
     }
 
-    fn log_message(&self, message: &str) -> Result<()> {
-        writeln!(&self.logger, "{}", message)?;
+    fn log(&self, message: &str) -> Result<()> {
+        let mut writer = &self.logger;
+        writeln!(writer, "{} {}", Local::now().format("%F %T"), message)?;
         Ok(())
     }
 }
 
 fn main() -> Result<(), anyhow::Error> {
-    let mut daemon = Daemon::new("/tmp/tmux_warm_daemon.pid", "/tmp/tmux_warm_daemon.log")?;
+    let config_path = std::env::args().nth(1).unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        format!("{}/.config/tmux_warm_daemon/config.yaml", home)
+    });
+
+    let config = if std::path::Path::new(&config_path).exists() {
+        Config::load(&config_path)?
+    } else {
+        eprintln!("Config not found at {}, using defaults", config_path);
+        Config::default()
+    };
+
+    let mut daemon = Daemon::new(config)?;
     daemon.run()?;
     Ok(())
 }
