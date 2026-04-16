@@ -1,11 +1,12 @@
 diff --git a/plugins/tmux/tmux.plugin.zsh b/plugins/tmux/tmux.plugin.zsh
-index 11820ebb..b2fecad7 100644
+index b1d97e9..3f2c4c6 100644
 --- a/plugins/tmux/tmux.plugin.zsh
 +++ b/plugins/tmux/tmux.plugin.zsh
-@@ -5,6 +5,10 @@ fi
+@@ -4,6 +4,11 @@ if ! (( $+commands[tmux] )); then
+ fi
  
  # CONFIGURATION VARIABLES
- : ${ZSH_TMUX_CD:=false}
++: ${ZSH_TMUX_CD:=false}
 +# When set, auto-attach targets a detached session whose name starts with this
 +# prefix (e.g. "warm" matches "warm-0", "warm-1"). Prevents attaching to
 +# sessions from other pools (like agent-*).
@@ -13,15 +14,39 @@ index 11820ebb..b2fecad7 100644
  # Automatically start tmux
  : ${ZSH_TMUX_AUTOSTART:=false}
  # Only autostart once. If set to false, tmux will attempt to
-@@ -135,6 +139,11 @@ function _zsh_tmux_plugin_run() {
-       session_name="$ZSH_TMUX_DEFAULT_SESSION_NAME"
+@@ -131,7 +136,7 @@ function _zsh_tmux_plugin_run() {
+ # Autostart if not already in tmux and enabled.
+-if [[ -z "$TMUX" && "$ZSH_TMUX_AUTOSTART" == "true" && -z "$INSIDE_EMACS" && -z "$EMACS" && -z "$VIM" && -z "$INTELLIJ_ENVIRONMENT_READER" && -z "$ZED_TERM" ]]; then
++if [[ -z "$TMUX" && "$ZSH_TMUX_AUTOSTART" == "true" && -z "$INSIDE_EMACS" && -z "$EMACS" && -z "$VIM" && -z "$NVIM" && -z "$INTELLIJ_ENVIRONMENT_READER" && -z "$ZED_TERM" ]]; then
+
+@@ -135,12 +140,26 @@ function _zsh_tmux_plugin_run() {
    fi
  
+   # Try to connect to an existing session.
+-  if [[ -n "$session_name" ]]; then
+-    [[ "$ZSH_TMUX_AUTOCONNECT" == "true" ]] && $tmux_cmd attach $_detached -t "$session_name"
+-  else
+-    [[ "$ZSH_TMUX_AUTOCONNECT" == "true" ]] && $tmux_cmd attach $_detached
 +  if [[ -n "$ZSH_TMUX_WARM_SESSION_PREFIX" && -z "$session_name" ]]; then
 +    session_name=$(command tmux list-sessions -F '#{session_name} #{session_attached}' 2>/dev/null \
 +      | awk -v pfx="${ZSH_TMUX_WARM_SESSION_PREFIX}-" '$1 ~ "^"pfx && $2 == 0 { print $1; exit }')
-+  fi
+   fi
+ 
++  if [[ -n "$ZSH_TMUX_CD" ]]; then
++    prelaunch_pwd=$(pwd)
++  	if [[ -n "$session_name" ]]; then
++  	  [[ "$ZSH_TMUX_AUTOCONNECT" == "true" ]] && $tmux_cmd attach $_detached -t "$session_name" \; send-keys "cd '${prelaunch_pwd}'" Enter
++  	else
++  	  [[ "$ZSH_TMUX_AUTOCONNECT" == "true" ]] && $tmux_cmd attach $_detached \; send-keys "cd '${prelaunch_pwd}'" Enter
++  	fi
++  else
++  	if [[ -n "$session_name" ]]; then
++  	  [[ "$ZSH_TMUX_AUTOCONNECT" == "true" ]] && $tmux_cmd attach $_detached -t "$session_name"
++  else
++  	  [[ "$ZSH_TMUX_AUTOCONNECT" == "true" ]] && $tmux_cmd attach $_detached
++  	fi
++  fi 
 +
-   # Try to connect to an existing session.
-   if [[ -n "$ZSH_TMUX_CD" ]]; then
-     prelaunch_pwd=$(pwd)
+   # If failed, just run tmux, fixing the TERM variable if requested.
+   if [[ $? -ne 0 ]]; then
+     if [[ "$ZSH_TMUX_FIXTERM" == "true" ]]; then
